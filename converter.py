@@ -45,6 +45,7 @@ def probe_duration(ffmpeg_path, source):
 class ConversionWorker(QThread):
     state_changed = Signal(int, str)
     progress_changed = Signal(int, int)  # index, percent
+    output_measured = Signal(int, int, str)  # index, taille réelle en octets, statut
     batch_finished = Signal(int, int, int, bool, list)  # ok, ignored, errors, cancelled, details
 
     def __init__(self, sources, output_folder, ffmpeg_path, settings=None, parent=None):
@@ -84,6 +85,10 @@ class ConversionWorker(QThread):
             target = self.output_folder / f"{source.stem}.{self.settings.container}"
             if target.exists():
                 skipped += 1
+                try:
+                    self.output_measured.emit(index, target.stat().st_size, "Déjà converti")
+                except OSError:
+                    pass
                 self.state_changed.emit(index, "Déjà converti")
                 self.progress_changed.emit(index, 100)
                 continue
@@ -156,11 +161,19 @@ class ConversionWorker(QThread):
                 elif target.exists():
                     # Un fichier créé entre-temps ne doit jamais être écrasé.
                     skipped += 1
+                    try:
+                        self.output_measured.emit(index, target.stat().st_size, "Déjà converti")
+                    except OSError:
+                        pass
                     self.state_changed.emit(index, "Déjà converti")
                     self.progress_changed.emit(index, 100)
                 else:
                     os.replace(temporary, target)
                     done += 1
+                    try:
+                        self.output_measured.emit(index, target.stat().st_size, "Terminé")
+                    except OSError:
+                        pass
                     self.state_changed.emit(index, "Terminé")
                     self.progress_changed.emit(index, 100)
             except (OSError, ValueError) as exc:

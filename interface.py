@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from converter import ConversionWorker, locate_ffmpeg
 from conversion_settings import ConversionSettings
 from presets import PresetStore, BUILTIN_PRESETS
+from compression_stats import format_bytes, reduction_percentage, calculate_summary
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4"}
 
@@ -36,13 +37,14 @@ class FFmpegGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("FFmpeg GUI")
-        self.resize(1250, 800)
+        self.resize(1450, 850)
 
         self.settings = QSettings("Deklou", "FFmpegGUI")
         self.last_input_dir = self.settings.value("last_input_dir", str(Path.home()))
         self.output_dir = self.settings.value("output_dir", "")
         self.video_paths = []
         self.video_keys = set()
+        self.output_sizes = {}  # index de ligne -> octets de sortie validée
         self.worker = None
         self.conversion_active = False
         self.ffmpeg_path = self.settings.value("ffmpeg_path", "") or locate_ffmpeg()
@@ -182,8 +184,11 @@ class FFmpegGUI(QMainWindow):
         queue_header.addWidget(self.clear_button)
         main_layout.addLayout(queue_header)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Nom du fichier", "Dossier source", "Format", "Taille", "État", "Progression"])
+        self.table = QTableWidget(0, 8)
+        self.table.setHorizontalHeaderLabels([
+            "Nom du fichier", "Dossier source", "Format", "Taille entrée",
+            "Taille sortie", "Réduction", "État", "Progression",
+        ])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -193,12 +198,37 @@ class FFmpegGUI(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        for column in range(4, 8):
+            self.table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
         main_layout.addWidget(self.table, 1)
 
         self.summary_label = QLabel("0 vidéo sélectionnée")
         main_layout.addWidget(self.summary_label)
+
+        # Synthèse indépendante de la progression : seuls les résultats réellement
+        # produits (ou déjà présents) sont comptés dans les tailles de sortie.
+        totals_row = QHBoxLayout()
+        self.total_input_label = QLabel("Entrée du lot : —")
+        self.total_output_label = QLabel("Sorties connues : —")
+        self.saved_label = QLabel("Espace économisé : —")
+        self.reduction_label = QLabel("Réduction : —")
+        for label in (
+            self.total_input_label, self.total_output_label,
+            self.saved_label, self.reduction_label,
+        ):
+            label.setStyleSheet("font-weight: 600; padding: 5px;")
+            totals_row.addWidget(label)
+        totals_row.addStretch()
+        main_layout.addLayout(totals_row)
+        self.totals_info = QLabel(
+            "La réduction globale porte uniquement sur les sorties connues "
+            "(terminées ou déjà présentes), jamais sur les vidéos en attente."
+        )
+        self.totals_info.setStyleSheet("color: #999;")
+        self.totals_info.setWordWrap(True)
+        main_layout.addWidget(self.totals_info)
 
         conversion_row = QHBoxLayout()
         self.start_button = QPushButton("Lancer les conversions")
@@ -446,15 +476,18 @@ class FFmpegGUI(QMainWindow):
             self.table.insertRow(row)
             name_item = QTableWidgetItem(path.name)
             name_item.setData(Qt.ItemDataRole.UserRole, str(path))
+            name_item.setData(Qt.ItemDataRole.UserRole + 1, size)
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, QTableWidgetItem(str(path.parent)))
             self.table.setItem(row, 2, QTableWidgetItem(path.suffix.lower()))
             self.table.setItem(row, 3, QTableWidgetItem(self.format_size(size)))
-            self.table.setItem(row, 4, QTableWidgetItem("En attente"))
+            self.table.setItem(row, 4, QTableWidgetItem("—"))
+            self.table.setItem(row, 5, QTableWidgetItem("—"))
+            self.table.setItem(row, 6, QTableWidgetItem("En attente"))
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setValue(0)
-            self.table.setCellWidget(row, 5, bar)
+            self.table.setCellWidget(row, 7, bar)
             added += 1
         self.update_paths()
         self.update_actions()
@@ -472,6 +505,9 @@ class FFmpegGUI(QMainWindow):
                     if self.path_key(existing) != self.path_key(path)
                 ]
             self.table.removeRow(row)
+        # Les indices de lignes ont changé ; les anciens résultats ne sont plus
+        # associés de façon fiable. On nettoie seulement les statistiques d'affichage.
+        self.reset_output_stats()
         self.update_paths()
         self.update_actions()
 
@@ -479,6 +515,7 @@ class FFmpegGUI(QMainWindow):
         self.video_paths.clear()
         self.video_keys.clear()
         self.table.setRowCount(0)
+        self.output_sizes.clear()
         self.update_paths()
         self.update_actions()
 
@@ -504,6 +541,7 @@ class FFmpegGUI(QMainWindow):
         self.summary_label.setText(
             f"{count} vidéo{'s' if count > 1 else ''} sélectionnée{'s' if count > 1 else ''}"
         )
+        self.update_size_summary()
         self.clear_button.setEnabled(count > 0 and not self.is_converting())
         self.remove_button.setEnabled(bool(self.table.selectedIndexes()) and not self.is_converting())
         self.import_button.setEnabled(not self.is_converting())
@@ -554,15 +592,17 @@ class FFmpegGUI(QMainWindow):
             return
 
         self.batch_progress.setValue(0)
+        self.reset_output_stats()
         for row in range(self.table.rowCount()):
-            self.table.item(row, 4).setText("En attente")
-            self.table.cellWidget(row, 5).setValue(0)
+            self.table.item(row, 6).setText("En attente")
+            self.table.cellWidget(row, 7).setValue(0)
         self.worker = ConversionWorker(
             self.video_paths, self.output_dir, self.ffmpeg_path,
             settings=conversion_settings, parent=self
         )
         self.worker.state_changed.connect(self.on_file_state)
         self.worker.progress_changed.connect(self.on_file_progress)
+        self.worker.output_measured.connect(self.on_output_measured)
         self.worker.batch_finished.connect(self.on_batch_finished)
         self.worker.finished.connect(self.on_worker_finished)
         self.worker.finished.connect(self.worker.deleteLater)
@@ -581,15 +621,70 @@ class FFmpegGUI(QMainWindow):
 
     def on_file_state(self, index, state):
         if index < self.table.rowCount():
-            self.table.item(index, 4).setText(state)
+            self.table.item(index, 6).setText(state)
 
     def on_file_progress(self, index, percentage):
         if index < self.table.rowCount():
-            self.table.cellWidget(index, 5).setValue(percentage)
+            self.table.cellWidget(index, 7).setValue(percentage)
         total = self.table.rowCount()
         if total:
-            progress_sum = sum(self.table.cellWidget(i, 5).value() for i in range(total))
+            progress_sum = sum(self.table.cellWidget(i, 7).value() for i in range(total))
             self.batch_progress.setValue(round(progress_sum / total))
+
+    def on_output_measured(self, index, output_bytes, status):
+        """Signal émis par le worker après succès ou pour une sortie déjà présente."""
+        if not 0 <= index < self.table.rowCount():
+            return
+        source_bytes = self.table.item(index, 0).data(Qt.ItemDataRole.UserRole + 1)
+        self.output_sizes[index] = int(output_bytes)
+        self.table.item(index, 4).setText(format_bytes(output_bytes))
+        reduction = reduction_percentage(source_bytes, output_bytes)
+        self.table.item(index, 5).setText(
+            f"{reduction:+.1f} %" if reduction is not None else "—"
+        )
+        self.table.item(index, 4).setToolTip(
+            "Fichier déjà présent (son encodage peut différer des réglages actuels)."
+            if status == "Déjà converti" else "Fichier converti avec succès."
+        )
+        self.update_size_summary()
+
+    def reset_output_stats(self):
+        self.output_sizes.clear()
+        for row in range(self.table.rowCount()):
+            self.table.item(row, 4).setText("—")
+            self.table.item(row, 5).setText("—")
+            self.table.item(row, 4).setToolTip("")
+        self.update_size_summary()
+
+    def update_size_summary(self):
+        sizes = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None:
+                sizes.append(int(item.data(Qt.ItemDataRole.UserRole + 1) or 0))
+        summary = calculate_summary(sizes, self.output_sizes)
+        self.total_input_label.setText(
+            f"Entrée du lot : {format_bytes(summary['total_input'])}"
+        )
+        if summary["known_count"] == 0:
+            self.total_output_label.setText("Sorties connues : —")
+            self.saved_label.setText("Espace économisé : —")
+            self.reduction_label.setText("Réduction : —")
+            return
+
+        self.total_output_label.setText(
+            f"Sorties connues ({summary['known_count']}/{summary['count']}) : "
+            f"{format_bytes(summary['known_output'])}"
+        )
+        saving = summary["known_input"] - summary["known_output"]
+        saving_abs = format_bytes(abs(saving))
+        self.saved_label.setText(
+            f"Espace {'économisé' if saving >= 0 else 'supplémentaire'} : {saving_abs}"
+        )
+        reduction = summary["known_reduction"]
+        self.reduction_label.setText(
+            f"Réduction : {reduction:+.1f} %" if reduction is not None else "Réduction : —"
+        )
 
     def on_batch_finished(self, done, skipped, failed, cancelled, errors):
         self.cancel_button.setEnabled(False)
