@@ -9,12 +9,17 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QLineEdit,
+    QProgressBar,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+from converter import ConversionWorker, locate_ffmpeg
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4"}
 
@@ -32,6 +37,9 @@ class FFmpegGUI(QMainWindow):
         self.output_dir = self.settings.value("output_dir", "")
         self.video_paths = []
         self.video_keys = set()
+        self.worker = None
+        self.conversion_active = False
+        self.ffmpeg_path = self.settings.value("ffmpeg_path", "") or locate_ffmpeg()
 
         self.setup_ui()
         self.update_paths()
@@ -71,6 +79,24 @@ class FFmpegGUI(QMainWindow):
 
         main_layout.addWidget(paths_group)
 
+        ffmpeg_group = QGroupBox("FFmpeg et paramètres de conversion")
+        ffmpeg_layout = QVBoxLayout(ffmpeg_group)
+        executable_row = QHBoxLayout()
+        self.ffmpeg_edit = QLineEdit(self.ffmpeg_path)
+        self.ffmpeg_edit.setPlaceholderText("Chemin vers ffmpeg.exe")
+        self.ffmpeg_browse = QPushButton("Parcourir...")
+        executable_row.addWidget(QLabel("FFmpeg :"))
+        executable_row.addWidget(self.ffmpeg_edit, 1)
+        executable_row.addWidget(self.ffmpeg_browse)
+        ffmpeg_layout.addLayout(executable_row)
+        self.encoding_info = QLabel(
+            "Sortie : MKV  |  Vidéo : H.265 / CRF 28 / medium  |  "
+            "Audio et sous-titres : copie"
+        )
+        self.encoding_info.setWordWrap(True)
+        ffmpeg_layout.addWidget(self.encoding_info)
+        main_layout.addWidget(ffmpeg_group)
+
         queue_header = QHBoxLayout()
         queue_title = QLabel("Vidéos sélectionnées")
         queue_title.setStyleSheet("font-size: 17px; font-weight: bold;")
@@ -83,8 +109,8 @@ class FFmpegGUI(QMainWindow):
         queue_header.addWidget(self.clear_button)
         main_layout.addLayout(queue_header)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Nom du fichier", "Dossier source", "Format", "Taille"])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Nom du fichier", "Dossier source", "Format", "Taille", "État", "Progression"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -94,17 +120,27 @@ class FFmpegGUI(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         main_layout.addWidget(self.table, 1)
 
         self.summary_label = QLabel("0 vidéo sélectionnée")
         main_layout.addWidget(self.summary_label)
 
-        info_label = QLabel(
-            "Étape 1 : sélection des vidéos. Les réglages FFmpeg et la conversion arriveront ensuite."
-        )
-        info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #999;")
-        main_layout.addWidget(info_label)
+        conversion_row = QHBoxLayout()
+        self.start_button = QPushButton("Lancer les conversions")
+        self.cancel_button = QPushButton("Annuler")
+        self.start_button.setMinimumHeight(40)
+        self.cancel_button.setMinimumHeight(40)
+        self.cancel_button.setEnabled(False)
+        conversion_row.addWidget(self.start_button)
+        conversion_row.addWidget(self.cancel_button)
+        conversion_row.addStretch()
+        main_layout.addLayout(conversion_row)
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setRange(0, 100)
+        self.batch_progress.setValue(0)
+        main_layout.addWidget(self.batch_progress)
 
         self.import_button.clicked.connect(self.import_videos)
         self.folder_button.clicked.connect(self.import_folder)
@@ -112,6 +148,10 @@ class FFmpegGUI(QMainWindow):
         self.remove_button.clicked.connect(self.remove_selected)
         self.clear_button.clicked.connect(self.clear_videos)
         self.table.itemSelectionChanged.connect(self.update_actions)
+        self.ffmpeg_browse.clicked.connect(self.select_ffmpeg)
+        self.ffmpeg_edit.editingFinished.connect(self.remember_ffmpeg)
+        self.start_button.clicked.connect(self.start_conversion)
+        self.cancel_button.clicked.connect(self.cancel_conversion)
 
     @staticmethod
     def path_key(path):
@@ -196,6 +236,11 @@ class FFmpegGUI(QMainWindow):
             self.table.setItem(row, 1, QTableWidgetItem(str(path.parent)))
             self.table.setItem(row, 2, QTableWidgetItem(path.suffix.lower()))
             self.table.setItem(row, 3, QTableWidgetItem(self.format_size(size)))
+            self.table.setItem(row, 4, QTableWidgetItem("En attente"))
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            self.table.setCellWidget(row, 5, bar)
             added += 1
         self.update_paths()
         self.update_actions()
@@ -245,5 +290,106 @@ class FFmpegGUI(QMainWindow):
         self.summary_label.setText(
             f"{count} vidéo{'s' if count > 1 else ''} sélectionnée{'s' if count > 1 else ''}"
         )
-        self.remove_button.setEnabled(bool(self.table.selectedIndexes()))
-        self.clear_button.setEnabled(count > 0)
+        self.clear_button.setEnabled(count > 0 and not self.is_converting())
+        self.remove_button.setEnabled(bool(self.table.selectedIndexes()) and not self.is_converting())
+        self.import_button.setEnabled(not self.is_converting())
+        self.folder_button.setEnabled(not self.is_converting())
+        self.output_button.setEnabled(not self.is_converting())
+        self.ffmpeg_edit.setEnabled(not self.is_converting())
+        self.ffmpeg_browse.setEnabled(not self.is_converting())
+        self.start_button.setEnabled(count > 0 and not self.is_converting())
+
+    def is_converting(self):
+        return self.conversion_active
+
+    def select_ffmpeg(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Sélectionner FFmpeg", self.ffmpeg_edit.text() or self.last_input_dir,
+            "Exécutable FFmpeg (ffmpeg.exe);;Tous les fichiers (*)",
+        )
+        if filename:
+            self.ffmpeg_edit.setText(filename)
+            self.remember_ffmpeg()
+
+    def remember_ffmpeg(self):
+        self.ffmpeg_path = self.ffmpeg_edit.text().strip().strip('"')
+        self.settings.setValue("ffmpeg_path", self.ffmpeg_path)
+
+    def start_conversion(self):
+        if self.is_converting() or not self.video_paths:
+            return
+        self.remember_ffmpeg()
+        if not Path(self.ffmpeg_path).is_file():
+            QMessageBox.warning(self, "FFmpeg", "Sélectionne un fichier ffmpeg.exe valide.")
+            return
+        if not self.output_dir:
+            QMessageBox.warning(self, "Dossier de sortie", "Choisis un dossier de sortie.")
+            return
+        if any(self.path_key(path) == self.path_key(Path(self.output_dir) / (Path(path).stem + ".mkv")) for path in self.video_paths):
+            QMessageBox.warning(self, "Dossier de sortie", "Le fichier de destination ne doit pas être le fichier source.")
+            return
+
+        self.batch_progress.setValue(0)
+        for row in range(self.table.rowCount()):
+            self.table.item(row, 4).setText("En attente")
+            self.table.cellWidget(row, 5).setValue(0)
+        self.worker = ConversionWorker(self.video_paths, self.output_dir, self.ffmpeg_path, self)
+        self.worker.state_changed.connect(self.on_file_state)
+        self.worker.progress_changed.connect(self.on_file_progress)
+        self.worker.batch_finished.connect(self.on_batch_finished)
+        self.worker.finished.connect(self.on_worker_finished)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.conversion_active = True
+        self.cancel_button.setEnabled(True)
+        self.update_actions()
+        self.worker.start()
+        self.update_actions()
+        self.statusBar().showMessage("Conversions en cours...")
+
+    def cancel_conversion(self):
+        if self.is_converting():
+            self.cancel_button.setEnabled(False)
+            self.statusBar().showMessage("Annulation demandée...")
+            self.worker.request_cancel()
+
+    def on_file_state(self, index, state):
+        if index < self.table.rowCount():
+            self.table.item(index, 4).setText(state)
+
+    def on_file_progress(self, index, percentage):
+        if index < self.table.rowCount():
+            self.table.cellWidget(index, 5).setValue(percentage)
+        total = self.table.rowCount()
+        if total:
+            progress_sum = sum(self.table.cellWidget(i, 5).value() for i in range(total))
+            self.batch_progress.setValue(round(progress_sum / total))
+
+    def on_batch_finished(self, done, skipped, failed, cancelled, errors):
+        self.cancel_button.setEnabled(False)
+        # La fin du thread suit immédiatement l'émission de batch_finished.
+        self.start_button.setEnabled(False)
+        self.statusBar().showMessage("Lot annulé" if cancelled else "Lot terminé")
+        message = (
+            f"Converties : {done}\nDéjà présentes : {skipped}\n"
+            f"Erreurs : {failed}"
+        )
+        if cancelled:
+            message += "\nConversion annulée."
+        if errors:
+            message += "\n\n" + "\n".join(errors[:5])
+        QMessageBox.information(self, "Résultat des conversions", message)
+
+    def on_worker_finished(self):
+        self.conversion_active = False
+        self.worker = None
+        self.update_actions()
+
+    def closeEvent(self, event):
+        if self.is_converting():
+            QMessageBox.information(
+                self, "Conversion en cours",
+                "Annule d'abord le traitement et attends sa fin avant de fermer."
+            )
+            event.ignore()
+        else:
+            event.accept()
