@@ -1,31 +1,42 @@
-# FFmpeg GUI — Étape 2
+# FFmpeg GUI — V0.3
 
-Interface Windows en Python / PySide6, construite progressivement.
+Application Windows en Python / PySide6 pour convertir des lots de vidéos MP4 et MKV sans ligne de commande.
 
-## Lancement
+## Installation et lancement
+
+Depuis le dossier du projet :
 
 ```powershell
 python -m pip install -r requirements.txt
 python main.py
 ```
 
-Configurer le chemin vers `ffmpeg.exe` si le programme n'est pas retrouvé automatiquement.
+Sélectionner ensuite `ffmpeg.exe` si l'application ne l'a pas trouvé automatiquement. `ffprobe.exe` placé dans le même dossier permet d'afficher la progression par durée.
 
-## Fonctions disponibles
+## Nouveautés V0.3
 
-- Import manuel de vidéos `.mkv` et `.mp4` ou import d'un dossier (non récursif).
-- File d'attente, suppression des entrées, affichage des dossiers et mémorisation des chemins via `QSettings`.
-- Conversion **séquentielle** vers **MKV / H.265** (`libx265`, CRF 28, preset `medium`).
-- Copie des pistes audio et sous-titres avec `-map 0:v -map 0:a? -map 0:s? -c:a copy -c:s copy`.
-- Progression par vidéo (si `ffprobe` disponible) et globale, annulation, messages d'erreur.
-- Ignore toute destination `.mkv` déjà existante.
-- Écrit d'abord dans un fichier temporaire `.part.mkv`; ne publie le MKV final qu'après succès.
+- Codecs H.265 (`libx265`) et H.264 (`libx264`).
+- CRF personnalisable (0 à 51) et vitesse de compression.
+- Audio : copie, AAC 192 kb/s, ou aucune piste.
+- Sous-titres : copie (MKV), ou suppression.
+- Conteneur : MKV ou MP4.
+- Presets intégrés et personnalisés, sélection immédiatement appliquée.
+- Les paramètres d'un lot sont figés au démarrage de la conversion.
 
-## Précautions
+Le preset **H.265 · Archivage MKV (habituel)** reproduit le réglage de ton script PowerShell : H.265, CRF 28, `medium`, audio et sous-titres copiés en MKV.
 
-- **La source n'est jamais effacée.** Choisir un dossier de sortie distinct est recommandé.
-- Des sources `exemple.mp4` et `exemple.mkv` ont toutes deux pour cible `exemple.mkv` : seule la première sera convertie, la seconde sera ignorée. Cette collision de noms sera mieux signalée dans une version ultérieure.
-- Tout MKV existant est considéré comme déjà converti (comme dans le script PowerShell d'origine) : ce n'est pas une vérification approfondie du contenu.
-- Si `ffprobe.exe` manque, la conversion fonctionne mais l'avancement intermédiaire ne peut pas être estimé.
-- Les paramètres d'encodage sont volontairement **fixes dans cette étape**. Les presets et options suivront une fois le moteur validé.
-- L'annulation arrête le processus courant et supprime la sortie temporaire, mais n'efface pas les conversions déjà terminées.
+Les presets personnalisés sont enregistrés dans `~/.ffmpeg_gui/presets.json` ; ce fichier n'est pas stocké dans GitHub.
+
+## Points à connaître
+
+- Les fichiers de sortie déjà existants sont ignorés, même s'ils ont été produits avec d'autres paramètres. Pour comparer plusieurs encodages, utiliser un dossier de sortie distinct ou renommer les fichiers.
+- Les pistes de sous-titres ne sont pas copiées vers MP4. L'application les désactive en passant de MKV à MP4.
+- En MP4, copier une piste audio non compatible peut entraîner une erreur FFmpeg. Le mode AAC 192 kb/s est recommandé pour la compatibilité.
+- Seuls les fichiers `.mkv` et `.mp4` sont importés ; l'ajout d'un dossier ne parcourt pas ses sous-dossiers.
+- Un lot est traité séquentiellement et peut être annulé.
+
+## Tests du moteur
+
+```powershell
+python -m unittest -v test_settings.py
+```

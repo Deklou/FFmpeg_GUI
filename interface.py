@@ -4,6 +4,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QSettings
 from PySide6.QtWidgets import (
     QFileDialog,
+    QComboBox,
+    QSpinBox,
+    QInputDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -20,12 +24,14 @@ from PySide6.QtWidgets import (
 )
 
 from converter import ConversionWorker, locate_ffmpeg
+from conversion_settings import ConversionSettings
+from presets import PresetStore, BUILTIN_PRESETS
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4"}
 
 
 class FFmpegGUI(QMainWindow):
-    """Étape 1 : préparer une liste de vidéos et un dossier de sortie."""
+    """Conversion par lot avec presets vidéo et contrôles de compatibilité."""
 
     def __init__(self):
         super().__init__()
@@ -40,10 +46,26 @@ class FFmpegGUI(QMainWindow):
         self.worker = None
         self.conversion_active = False
         self.ffmpeg_path = self.settings.value("ffmpeg_path", "") or locate_ffmpeg()
+        self.applying_preset = False
+        self.preset_store = None
+        self.preset_error = None
+        self.preset_read_only = False
+        try:
+            self.preset_store = PresetStore()
+        except ValueError as exc:
+            self.preset_error = str(exc)
+            self.preset_read_only = True
+            # Les presets sur le disque ne sont jamais modifiés si la lecture échoue.
+            self.preset_store = PresetStore.__new__(PresetStore)
+            self.preset_store.path = Path.home() / ".ffmpeg_gui" / "presets.json"
+            self.preset_store.custom = {}
+
 
         self.setup_ui()
         self.update_paths()
         self.update_actions()
+        if self.preset_error:
+            QMessageBox.warning(self, "Presets illisibles", self.preset_error)
 
     def setup_ui(self):
         central = QWidget()
@@ -89,13 +111,64 @@ class FFmpegGUI(QMainWindow):
         executable_row.addWidget(self.ffmpeg_edit, 1)
         executable_row.addWidget(self.ffmpeg_browse)
         ffmpeg_layout.addLayout(executable_row)
-        self.encoding_info = QLabel(
-            "Sortie : MKV  |  Vidéo : H.265 / CRF 28 / medium  |  "
-            "Audio et sous-titres : copie"
-        )
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("Preset :"))
+        self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumWidth(240)
+        self.preset_combo.addItem("Personnalisé", None)
+        for name in self.preset_store.all_presets():
+            self.preset_combo.addItem(name, name)
+        self.save_preset_button = QPushButton("Sauvegarder")
+        self.delete_preset_button = QPushButton("Supprimer")
+        preset_row.addWidget(self.preset_combo, 1)
+        preset_row.addWidget(self.save_preset_button)
+        preset_row.addWidget(self.delete_preset_button)
+        ffmpeg_layout.addLayout(preset_row)
+
+        options_row = QHBoxLayout()
+        video_group = QGroupBox("Vidéo")
+        video_layout = QFormLayout(video_group)
+        self.codec_combo = QComboBox()
+        self.codec_combo.addItem("H.265 / HEVC", "libx265")
+        self.codec_combo.addItem("H.264 / AVC", "libx264")
+        self.crf_spin = QSpinBox()
+        self.crf_spin.setRange(0, 51)
+        self.crf_spin.setValue(28)
+        self.crf_spin.setToolTip("Plus bas : qualité supérieure et fichiers plus volumineux.")
+        self.speed_combo = QComboBox()
+        for speed in ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"):
+            self.speed_combo.addItem(speed, speed)
+        self.speed_combo.setCurrentIndex(self.speed_combo.findData("medium"))
+        video_layout.addRow("Codec :", self.codec_combo)
+        video_layout.addRow("CRF :", self.crf_spin)
+        video_layout.addRow("Vitesse :", self.speed_combo)
+
+        tracks_group = QGroupBox("Pistes et format")
+        tracks_layout = QFormLayout(tracks_group)
+        self.audio_combo = QComboBox()
+        self.audio_combo.addItem("Copier sans réencoder", "copy")
+        self.audio_combo.addItem("AAC 192 kb/s", "aac")
+        self.audio_combo.addItem("Ignorer les pistes audio", "none")
+        self.subtitle_combo = QComboBox()
+        self.subtitle_combo.addItem("Copier toutes les pistes", "copy")
+        self.subtitle_combo.addItem("Ignorer les sous-titres", "none")
+        self.container_combo = QComboBox()
+        self.container_combo.addItem("MKV", "mkv")
+        self.container_combo.addItem("MP4", "mp4")
+        tracks_layout.addRow("Audio :", self.audio_combo)
+        tracks_layout.addRow("Sous-titres :", self.subtitle_combo)
+        tracks_layout.addRow("Sortie :", self.container_combo)
+
+        options_row.addWidget(video_group, 1)
+        options_row.addWidget(tracks_group, 1)
+        ffmpeg_layout.addLayout(options_row)
+
+        self.encoding_info = QLabel()
         self.encoding_info.setWordWrap(True)
+        self.encoding_info.setStyleSheet("color: #aaaaaa;")
         ffmpeg_layout.addWidget(self.encoding_info)
         main_layout.addWidget(ffmpeg_group)
+        self.apply_conversion_settings(ConversionSettings(), select_preset="H.265 · Archivage MKV (habituel)")
 
         queue_header = QHBoxLayout()
         queue_title = QLabel("Vidéos sélectionnées")
@@ -152,6 +225,147 @@ class FFmpegGUI(QMainWindow):
         self.ffmpeg_edit.editingFinished.connect(self.remember_ffmpeg)
         self.start_button.clicked.connect(self.start_conversion)
         self.cancel_button.clicked.connect(self.cancel_conversion)
+        self.preset_combo.currentIndexChanged.connect(self.on_preset_selected)
+        self.save_preset_button.clicked.connect(self.save_preset)
+        self.delete_preset_button.clicked.connect(self.delete_preset)
+        self.codec_combo.currentIndexChanged.connect(self.on_options_changed)
+        self.crf_spin.valueChanged.connect(self.on_options_changed)
+        self.speed_combo.currentIndexChanged.connect(self.on_options_changed)
+        self.audio_combo.currentIndexChanged.connect(self.on_options_changed)
+        self.subtitle_combo.currentIndexChanged.connect(self.on_options_changed)
+        self.container_combo.currentIndexChanged.connect(self.on_container_changed)
+        self.update_options_label()
+        self.update_preset_actions()
+
+    def current_conversion_settings(self):
+        return ConversionSettings(
+            codec=self.codec_combo.currentData(),
+            crf=self.crf_spin.value(),
+            speed=self.speed_combo.currentData(),
+            audio=self.audio_combo.currentData(),
+            subtitles=self.subtitle_combo.currentData(),
+            container=self.container_combo.currentData(),
+        )
+
+    @staticmethod
+    def choose_combo(combo, data):
+        index = combo.findData(data)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def apply_conversion_settings(self, settings, select_preset=None):
+        self.applying_preset = True
+        try:
+            self.choose_combo(self.codec_combo, settings.codec)
+            self.crf_spin.setValue(settings.crf)
+            self.choose_combo(self.speed_combo, settings.speed)
+            self.choose_combo(self.audio_combo, settings.audio)
+            self.choose_combo(self.subtitle_combo, settings.subtitles)
+            self.choose_combo(self.container_combo, settings.container)
+            index = self.preset_combo.findData(select_preset)
+            self.preset_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self.applying_preset = False
+        self.update_options_label()
+        self.update_preset_actions()
+
+    def on_preset_selected(self, _index):
+        if self.applying_preset:
+            return
+        name = self.preset_combo.currentData()
+        if name is None:
+            self.update_preset_actions()
+            return
+        try:
+            settings = ConversionSettings.from_dict(self.preset_store.all_presets()[name])
+        except (KeyError, ValueError) as exc:
+            QMessageBox.warning(self, "Preset", str(exc))
+            return
+        self.apply_conversion_settings(settings, select_preset=name)
+
+    def on_container_changed(self, _index=None):
+        if self.applying_preset:
+            return
+        if self.container_combo.currentData() == "mp4" and self.subtitle_combo.currentData() == "copy":
+            # La copie des sous-titres MKV dans MP4 peut être impossible.
+            self.applying_preset = True
+            self.choose_combo(self.subtitle_combo, "none")
+            self.applying_preset = False
+            self.statusBar().showMessage("MP4 : les sous-titres ont été réglés sur Ignorer.", 7000)
+        self.on_options_changed()
+
+    def on_options_changed(self, _value=None):
+        if self.applying_preset:
+            return
+        if self.preset_combo.currentIndex() != 0:
+            self.preset_combo.blockSignals(True)
+            self.preset_combo.setCurrentIndex(0)
+            self.preset_combo.blockSignals(False)
+        self.update_options_label()
+        self.update_preset_actions()
+
+    def update_options_label(self):
+        settings = self.current_conversion_settings()
+        message = (
+            f"Sortie : {settings.container.upper()}  |  "
+            f"Vidéo : {settings.codec} / CRF {settings.crf} / {settings.speed}  |  "
+            f"Audio : {settings.audio}  |  Sous-titres : {settings.subtitles}"
+        )
+        if settings.container == "mp4" and settings.audio == "copy":
+            message += "\nAttention : certaines pistes audio copiées ne sont pas compatibles MP4. AAC est plus sûr."
+        if settings.container == "mp4" and settings.subtitles == "copy":
+            message += "\nIncompatible : copie directe des sous-titres en MP4."
+        self.encoding_info.setText(message)
+
+    def update_preset_actions(self):
+        if not hasattr(self, "preset_combo") or not hasattr(self, "delete_preset_button"):
+            return
+        name = self.preset_combo.currentData()
+        self.delete_preset_button.setEnabled(
+            not self.is_converting() and not self.preset_read_only and name in self.preset_store.custom
+        )
+        self.save_preset_button.setEnabled(not self.is_converting() and not self.preset_read_only)
+        self.preset_combo.setEnabled(not self.is_converting())
+
+    def save_preset(self):
+        name, accepted = QInputDialog.getText(self, "Sauvegarder un preset", "Nom du preset :")
+        if not accepted or not name.strip():
+            return
+        name = name.strip()
+        if name in self.preset_store.custom:
+            reply = QMessageBox.question(self, "Remplacer le preset", f"Remplacer « {name} » ?")
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            self.preset_store.set(name, self.current_conversion_settings().to_dict())
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Preset", str(exc))
+            return
+        self.refresh_preset_combo(name)
+
+    def delete_preset(self):
+        name = self.preset_combo.currentData()
+        if name not in self.preset_store.custom or self.preset_read_only:
+            return
+        answer = QMessageBox.question(self, "Supprimer le preset", f"Supprimer « {name} » ?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.preset_store.delete(name)
+        except OSError as exc:
+            QMessageBox.warning(self, "Preset", str(exc))
+            return
+        self.refresh_preset_combo(None)
+
+    def refresh_preset_combo(self, name):
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        self.preset_combo.addItem("Personnalisé", None)
+        for preset_name in self.preset_store.all_presets():
+            self.preset_combo.addItem(preset_name, preset_name)
+        self.preset_combo.setCurrentIndex(max(0, self.preset_combo.findData(name)))
+        self.preset_combo.blockSignals(False)
+        self.update_preset_actions()
 
     @staticmethod
     def path_key(path):
@@ -298,6 +512,10 @@ class FFmpegGUI(QMainWindow):
         self.ffmpeg_edit.setEnabled(not self.is_converting())
         self.ffmpeg_browse.setEnabled(not self.is_converting())
         self.start_button.setEnabled(count > 0 and not self.is_converting())
+        for control in (self.codec_combo, self.crf_spin, self.speed_combo,
+                        self.audio_combo, self.subtitle_combo, self.container_combo):
+            control.setEnabled(not self.is_converting())
+        self.update_preset_actions()
 
     def is_converting(self):
         return self.conversion_active
@@ -325,7 +543,13 @@ class FFmpegGUI(QMainWindow):
         if not self.output_dir:
             QMessageBox.warning(self, "Dossier de sortie", "Choisis un dossier de sortie.")
             return
-        if any(self.path_key(path) == self.path_key(Path(self.output_dir) / (Path(path).stem + ".mkv")) for path in self.video_paths):
+        conversion_settings = self.current_conversion_settings()
+        try:
+            conversion_settings.validate()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Paramètres incompatibles", str(exc))
+            return
+        if any(self.path_key(path) == self.path_key(Path(self.output_dir) / (Path(path).stem + f".{conversion_settings.container}")) for path in self.video_paths):
             QMessageBox.warning(self, "Dossier de sortie", "Le fichier de destination ne doit pas être le fichier source.")
             return
 
@@ -333,7 +557,10 @@ class FFmpegGUI(QMainWindow):
         for row in range(self.table.rowCount()):
             self.table.item(row, 4).setText("En attente")
             self.table.cellWidget(row, 5).setValue(0)
-        self.worker = ConversionWorker(self.video_paths, self.output_dir, self.ffmpeg_path, self)
+        self.worker = ConversionWorker(
+            self.video_paths, self.output_dir, self.ffmpeg_path,
+            settings=conversion_settings, parent=self
+        )
         self.worker.state_changed.connect(self.on_file_state)
         self.worker.progress_changed.connect(self.on_file_progress)
         self.worker.batch_finished.connect(self.on_batch_finished)

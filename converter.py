@@ -9,6 +9,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from conversion_settings import ConversionSettings, build_command
+
 
 DEFAULT_FFMPEG = r"C:\Outils\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"
 
@@ -45,11 +47,13 @@ class ConversionWorker(QThread):
     progress_changed = Signal(int, int)  # index, percent
     batch_finished = Signal(int, int, int, bool, list)  # ok, ignored, errors, cancelled, details
 
-    def __init__(self, sources, output_folder, ffmpeg_path, parent=None):
+    def __init__(self, sources, output_folder, ffmpeg_path, settings=None, parent=None):
         super().__init__(parent)
         self.sources = list(sources)
         self.output_folder = Path(output_folder)
         self.ffmpeg_path = str(ffmpeg_path)
+        self.settings = settings if settings is not None else ConversionSettings()
+        self.settings.validate()
         self.cancel_event = threading.Event()
         self._process = None
         self._process_lock = threading.Lock()
@@ -77,7 +81,7 @@ class ConversionWorker(QThread):
             if self.cancel_event.is_set():
                 break
             source = Path(filename)
-            target = self.output_folder / f"{source.stem}.mkv"
+            target = self.output_folder / f"{source.stem}.{self.settings.container}"
             if target.exists():
                 skipped += 1
                 self.state_changed.emit(index, "Déjà converti")
@@ -93,16 +97,9 @@ class ConversionWorker(QThread):
             self.state_changed.emit(index, "Conversion en cours")
             self.progress_changed.emit(index, 0)
             duration = probe_duration(self.ffmpeg_path, source)
-            # Suffixe .mkv impératif pour le choix du conteneur par FFmpeg.
-            temporary = self.output_folder / f".{source.stem}.{uuid.uuid4().hex}.part.mkv"
-            command = [
-                self.ffmpeg_path, "-hide_banner", "-nostdin", "-nostats", "-y",
-                "-i", str(source),
-                "-map", "0:v", "-map", "0:a?", "-map", "0:s?",
-                "-c:v", "libx265", "-crf", "28", "-preset", "medium",
-                "-c:a", "copy", "-c:s", "copy",
-                "-progress", "pipe:1", str(temporary),
-            ]
+            # Le fichier temporaire conserve l’extension du conteneur pour FFmpeg.
+            temporary = self.output_folder / f".{source.stem}.{uuid.uuid4().hex}.part.{self.settings.container}"
+            command = build_command(self.ffmpeg_path, source, temporary, self.settings)
             recent_errors = []
             process = None
             stderr_reader = None
