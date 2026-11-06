@@ -1,7 +1,8 @@
 import os
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtWidgets import (
     QFileDialog,
     QComboBox,
@@ -27,6 +28,7 @@ from converter import ConversionWorker, locate_ffmpeg
 from conversion_settings import ConversionSettings
 from presets import PresetStore, BUILTIN_PRESETS
 from compression_stats import format_bytes, reduction_percentage, calculate_summary
+from conversion_time import format_duration, format_reduction
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4"}
 
@@ -47,6 +49,13 @@ class FFmpegGUI(QMainWindow):
         self.output_sizes = {}  # index de ligne -> octets de sortie validée
         self.worker = None
         self.conversion_active = False
+        self.batch_started_at = None
+        self.active_file_started_at = None
+        self.active_file_index = None
+        self.batch_eta_seconds = None
+        self.elapsed_timer = QTimer(self)
+        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(self.update_elapsed_clock)
         self.ffmpeg_path = self.settings.value("ffmpeg_path", "") or locate_ffmpeg()
         self.applying_preset = False
         self.preset_store = None
@@ -184,10 +193,11 @@ class FFmpegGUI(QMainWindow):
         queue_header.addWidget(self.clear_button)
         main_layout.addLayout(queue_header)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels([
             "Nom du fichier", "Dossier source", "Format", "Taille entrée",
             "Taille sortie", "Réduction", "État", "Progression",
+            "Temps écoulé", "Restant estimé", "Vitesse",
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
@@ -198,7 +208,7 @@ class FFmpegGUI(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        for column in range(4, 8):
+        for column in range(4, 11):
             self.table.horizontalHeader().setSectionResizeMode(
                 column, QHeaderView.ResizeMode.ResizeToContents
             )
@@ -244,6 +254,14 @@ class FFmpegGUI(QMainWindow):
         self.batch_progress.setRange(0, 100)
         self.batch_progress.setValue(0)
         main_layout.addWidget(self.batch_progress)
+        time_row = QHBoxLayout()
+        self.batch_elapsed_label = QLabel("Temps écoulé du lot : 00:00:00")
+        self.batch_eta_label = QLabel("Temps restant estimé du lot : —")
+        for label in (self.batch_elapsed_label, self.batch_eta_label):
+            label.setStyleSheet("font-weight: 600; padding: 5px;")
+            time_row.addWidget(label)
+        time_row.addStretch()
+        main_layout.addLayout(time_row)
 
         self.import_button.clicked.connect(self.import_videos)
         self.folder_button.clicked.connect(self.import_folder)
@@ -488,6 +506,8 @@ class FFmpegGUI(QMainWindow):
             bar.setRange(0, 100)
             bar.setValue(0)
             self.table.setCellWidget(row, 7, bar)
+            for col in (8, 9, 10):
+                self.table.setItem(row, col, QTableWidgetItem("—"))
             added += 1
         self.update_paths()
         self.update_actions()
@@ -592,10 +612,17 @@ class FFmpegGUI(QMainWindow):
             return
 
         self.batch_progress.setValue(0)
+        self.batch_elapsed_label.setText("Temps écoulé du lot : 00:00:00")
+        self.batch_eta_label.setText("Temps restant estimé du lot : —")
+        self.batch_eta_seconds = None
+        self.active_file_started_at = None
+        self.active_file_index = None
         self.reset_output_stats()
         for row in range(self.table.rowCount()):
             self.table.item(row, 6).setText("En attente")
             self.table.cellWidget(row, 7).setValue(0)
+            for col in (8, 9, 10):
+                self.table.item(row, col).setText("—")
         self.worker = ConversionWorker(
             self.video_paths, self.output_dir, self.ffmpeg_path,
             settings=conversion_settings, parent=self
@@ -603,12 +630,17 @@ class FFmpegGUI(QMainWindow):
         self.worker.state_changed.connect(self.on_file_state)
         self.worker.progress_changed.connect(self.on_file_progress)
         self.worker.output_measured.connect(self.on_output_measured)
+        self.worker.timing_started.connect(self.on_timing_started)
+        self.worker.timing_updated.connect(self.on_timing_updated)
+        self.worker.timing_finished.connect(self.on_timing_finished)
         self.worker.batch_finished.connect(self.on_batch_finished)
         self.worker.finished.connect(self.on_worker_finished)
         self.worker.finished.connect(self.worker.deleteLater)
         self.conversion_active = True
         self.cancel_button.setEnabled(True)
         self.update_actions()
+        self.batch_started_at = time.monotonic()
+        self.elapsed_timer.start()
         self.worker.start()
         self.update_actions()
         self.statusBar().showMessage("Conversions en cours...")
@@ -631,6 +663,49 @@ class FFmpegGUI(QMainWindow):
             progress_sum = sum(self.table.cellWidget(i, 7).value() for i in range(total))
             self.batch_progress.setValue(round(progress_sum / total))
 
+    def update_elapsed_clock(self):
+        now = time.monotonic()
+        if self.batch_started_at is not None:
+            elapsed = now - self.batch_started_at
+            self.batch_elapsed_label.setText(
+                f"Temps écoulé du lot : {format_duration(elapsed)}"
+            )
+        if self.active_file_started_at is not None and self.active_file_index is not None:
+            row = self.active_file_index
+            if 0 <= row < self.table.rowCount():
+                self.table.item(row, 8).setText(
+                    format_duration(now - self.active_file_started_at)
+                )
+
+    def on_timing_started(self, index):
+        self.active_file_index = index
+        self.active_file_started_at = time.monotonic()
+        self.batch_eta_seconds = None
+        self.batch_eta_label.setText("Temps restant estimé du lot : —")
+        if 0 <= index < self.table.rowCount():
+            self.table.item(index, 8).setText("00:00:00")
+            self.table.item(index, 9).setText("—")
+            self.table.item(index, 10).setText("—")
+
+    def on_timing_updated(self, index, elapsed, remaining, speed, batch_remaining):
+        if not 0 <= index < self.table.rowCount():
+            return
+        self.table.item(index, 8).setText(format_duration(elapsed))
+        self.table.item(index, 9).setText(format_duration(remaining))
+        self.table.item(index, 10).setText(f"{speed:.2f}x" if speed > 0 else "—")
+        self.batch_eta_seconds = batch_remaining if batch_remaining >= 0 else None
+        self.batch_eta_label.setText(
+            f"Temps restant estimé du lot : {format_duration(self.batch_eta_seconds)}"
+        )
+
+    def on_timing_finished(self, index, elapsed):
+        if 0 <= index < self.table.rowCount():
+            self.table.item(index, 8).setText(format_duration(elapsed))
+            self.table.item(index, 9).setText("—")
+        if self.active_file_index == index:
+            self.active_file_index = None
+            self.active_file_started_at = None
+
     def on_output_measured(self, index, output_bytes, status):
         """Signal émis par le worker après succès ou pour une sortie déjà présente."""
         if not 0 <= index < self.table.rowCount():
@@ -640,7 +715,7 @@ class FFmpegGUI(QMainWindow):
         self.table.item(index, 4).setText(format_bytes(output_bytes))
         reduction = reduction_percentage(source_bytes, output_bytes)
         self.table.item(index, 5).setText(
-            f"{reduction:+.1f} %" if reduction is not None else "—"
+            format_reduction(reduction)
         )
         self.table.item(index, 4).setToolTip(
             "Fichier déjà présent (son encodage peut différer des réglages actuels)."
@@ -683,7 +758,7 @@ class FFmpegGUI(QMainWindow):
         )
         reduction = summary["known_reduction"]
         self.reduction_label.setText(
-            f"Réduction : {reduction:+.1f} %" if reduction is not None else "Réduction : —"
+            f"Réduction : {format_reduction(reduction)}"
         )
 
     def on_batch_finished(self, done, skipped, failed, cancelled, errors):
@@ -702,6 +777,11 @@ class FFmpegGUI(QMainWindow):
         QMessageBox.information(self, "Résultat des conversions", message)
 
     def on_worker_finished(self):
+        self.elapsed_timer.stop()
+        self.update_elapsed_clock()
+        self.active_file_index = None
+        self.active_file_started_at = None
+        self.batch_eta_label.setText("Temps restant estimé du lot : —")
         self.conversion_active = False
         self.worker = None
         self.update_actions()

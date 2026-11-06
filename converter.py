@@ -4,12 +4,14 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
 from conversion_settings import ConversionSettings, build_command
+from conversion_time import parse_speed, parse_out_time, estimate_remaining
 
 
 DEFAULT_FFMPEG = r"C:\Outils\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe"
@@ -45,6 +47,9 @@ def probe_duration(ffmpeg_path, source):
 class ConversionWorker(QThread):
     state_changed = Signal(int, str)
     progress_changed = Signal(int, int)  # index, percent
+    timing_started = Signal(int)
+    timing_updated = Signal(int, float, float, float, float)  # index, elapsed, ETA fichier, vitesse, ETA lot
+    timing_finished = Signal(int, float)
     output_measured = Signal(int, int, str)  # index, taille réelle en octets, statut
     batch_finished = Signal(int, int, int, bool, list)  # ok, ignored, errors, cancelled, details
 
@@ -78,6 +83,19 @@ class ConversionWorker(QThread):
             self.batch_finished.emit(0, 0, len(self.sources), False, [str(exc)])
             return
 
+        # Analyse des durées une seule fois, pour une estimation de lot lorsque
+        # ffprobe est disponible pour tous les fichiers restant à convertir.
+        durations = {}
+        for index, filename in enumerate(self.sources):
+            if self.cancel_event.is_set():
+                break
+            source = Path(filename)
+            target = self.output_folder / f"{source.stem}.{self.settings.container}"
+            if target.exists() or not source.is_file():
+                durations[index] = 0.0
+            else:
+                durations[index] = probe_duration(self.ffmpeg_path, source)
+
         for index, filename in enumerate(self.sources):
             if self.cancel_event.is_set():
                 break
@@ -101,13 +119,14 @@ class ConversionWorker(QThread):
 
             self.state_changed.emit(index, "Conversion en cours")
             self.progress_changed.emit(index, 0)
-            duration = probe_duration(self.ffmpeg_path, source)
+            duration = durations.get(index)
             # Le fichier temporaire conserve l’extension du conteneur pour FFmpeg.
             temporary = self.output_folder / f".{source.stem}.{uuid.uuid4().hex}.part.{self.settings.container}"
             command = build_command(self.ffmpeg_path, source, temporary, self.settings)
             recent_errors = []
             process = None
             stderr_reader = None
+            started_at = None
             try:
                 process = subprocess.Popen(
                     command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -116,6 +135,8 @@ class ConversionWorker(QThread):
                 )
                 with self._process_lock:
                     self._process = process
+                started_at = time.monotonic()
+                self.timing_started.emit(index)
 
                 def read_errors():
                     for line in process.stderr:
@@ -126,23 +147,37 @@ class ConversionWorker(QThread):
                 stderr_reader = threading.Thread(target=read_errors, daemon=True)
                 stderr_reader.start()
 
+                progress_block = {}
                 for raw_line in process.stdout:
                     if self.cancel_event.is_set():
                         break
                     key, separator, value = raw_line.strip().partition("=")
-                    if separator and duration and key == "out_time_us":
-                        try:
-                            percent = min(99, max(0, int(float(value) / 1_000_000 / duration * 100)))
-                            self.progress_changed.emit(index, percent)
-                        except ValueError:
-                            pass
-                    elif separator and duration and key == "out_time_ms":
-                        # Anciennes versions FFmpeg : valeur en microsecondes malgré le nom.
-                        try:
-                            percent = min(99, max(0, int(float(value) / 1_000_000 / duration * 100)))
-                            self.progress_changed.emit(index, percent)
-                        except ValueError:
-                            pass
+                    if not separator:
+                        continue
+                    progress_block[key] = value
+                    if key != "progress":
+                        continue
+
+                    encoded_seconds = parse_out_time(progress_block)
+                    speed = parse_speed(progress_block.get("speed"))
+                    elapsed = time.monotonic() - started_at
+                    remaining = estimate_remaining(duration, encoded_seconds, speed)
+                    pending = [durations.get(i) for i in range(index + 1, len(self.sources))]
+                    if remaining is not None and all(p is not None for p in pending):
+                        batch_remaining = remaining + sum(pending) / speed
+                    else:
+                        batch_remaining = None
+
+                    if duration and encoded_seconds is not None:
+                        percent = min(99, max(0, int(encoded_seconds / duration * 100)))
+                        self.progress_changed.emit(index, percent)
+                    self.timing_updated.emit(
+                        index, elapsed,
+                        remaining if remaining is not None else -1.0,
+                        speed if speed is not None else -1.0,
+                        batch_remaining if batch_remaining is not None else -1.0,
+                    )
+                    progress_block.clear()
 
                 if self.cancel_event.is_set() and process.poll() is None:
                     process.terminate()
@@ -181,6 +216,9 @@ class ConversionWorker(QThread):
                 self.state_changed.emit(index, "Erreur")
                 errors.append(f"{source.name} : {exc}")
             finally:
+                if started_at is not None:
+                    self.timing_finished.emit(index, time.monotonic() - started_at)
+                durations[index] = 0.0
                 if process and process.poll() is None:
                     try:
                         process.terminate()
