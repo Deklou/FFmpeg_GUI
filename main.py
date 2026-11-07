@@ -1,7 +1,7 @@
-"""Point d'entrée FFmpeg GUI."""
+"""Point d'entrée de FFmpeg GUI."""
 import sys
 from PySide6.QtWidgets import QApplication
-from interface_v013 import FFmpegGUI
+from interface import FFmpegGUI
 
 
 def main():
@@ -11,5 +11,5 @@ def main():
     sys.exit(app.exec())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
