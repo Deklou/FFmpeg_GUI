@@ -1,9 +1,11 @@
-# Exécuter depuis Windows PowerShell : .\build_windows.ps1
+# FFmpeg GUI - Compilation Windows : un seul EXE avec icone
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
-if (!(Test-Path '.\requirements.txt') -or !(Test-Path '.\main.py')) {
-    throw 'Place ce script dans le dossier racine de FFmpeg_GUI (avec main.py et requirements.txt).'
+foreach ($file in @('main.py', 'requirements.txt', 'FFmpeg_GUI.ico')) {
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        throw "Fichier requis introuvable : $file"
+    }
 }
 
 if (Get-Command py -ErrorAction SilentlyContinue) {
@@ -11,24 +13,20 @@ if (Get-Command py -ErrorAction SilentlyContinue) {
 } elseif (Get-Command python -ErrorAction SilentlyContinue) {
     $python = 'python'
 } else {
-    throw 'Python est introuvable. Installe Python pour compiler l’application.'
+    throw 'Python introuvable.'
 }
 
-Write-Host 'Installation des dépendances de compilation...'
 & $python -m pip install -r requirements.txt pyinstaller
-if ($LASTEXITCODE -ne 0) { throw 'Echec installation des dépendances.' }
+if ($LASTEXITCODE -ne 0) { throw 'Installation des dependances echouee.' }
 
-Write-Host 'Compilation de FFmpeg GUI...'
-& $python -m PyInstaller --noconfirm --clean --onedir --windowed --name FFmpeg_GUI main.py
-if ($LASTEXITCODE -ne 0) { throw 'Echec compilation PyInstaller.' }
+$iconPath = (Resolve-Path -LiteralPath '.\FFmpeg_GUI.ico').Path
+& $python -m PyInstaller --noconfirm --clean --onefile --windowed --icon $iconPath --name FFmpeg_GUI main.py
+if ($LASTEXITCODE -ne 0) { throw 'Compilation PyInstaller echouee.' }
 
-$releaseDir = Join-Path $PSScriptRoot 'dist\FFmpeg_GUI'
-$exe = Join-Path $releaseDir 'FFmpeg_GUI.exe'
-if (!(Test-Path $exe)) { throw "Exécutable absent : $exe" }
-
-$zip = Join-Path $PSScriptRoot 'dist\FFmpeg_GUI_Windows_portable.zip'
-if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path (Join-Path $releaseDir '*') -DestinationPath $zip -CompressionLevel Optimal
-Write-Host "Exécutable : $exe"
-Write-Host "ZIP portable : $zip"
-Write-Host 'FFmpeg est à télécharger séparément sur https://ffmpeg.org/download.html'
+$exe = Join-Path $PSScriptRoot 'dist\FFmpeg_GUI.exe'
+if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+    throw "EXE introuvable apres compilation : $exe"
+}
+Write-Host "Compilation reussie : $exe" -ForegroundColor Green
+Write-Host "Attention : l'ancien dossier dist\FFmpeg_GUI et l'ancien ZIP ne sont pas regeneres."
+Write-Host 'FFmpeg est a installer separement : https://ffmpeg.org/download.html'
