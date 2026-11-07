@@ -64,10 +64,8 @@ class FFmpegGUI(PreviousFFmpegGUI):
             raise RuntimeError('Groupe des paramètres FFmpeg introuvable.')
         self.ffmpeg_help_label = QLabel(
             'FFmpeg introuvable. Télécharge-le sur '
-            '<a href="https://ffmpeg.org/download.html">ffmpeg.org</a>, '
-            'puis sélectionne ffmpeg.exe avec « Parcourir... ». '
-            'Tu peux aussi le placer dans le dossier du programme, dans bin/, '
-            'ou dans le PATH Windows.'
+            '<a href="https://ffmpeg.org/download.html">ffmpeg.org</a> '
+            '(ffmpeg.exe se trouve dans le dossier bin du téléchargement).'
         )
         self.ffmpeg_help_label.setWordWrap(True)
         self.ffmpeg_help_label.setTextFormat(Qt.TextFormat.RichText)
@@ -118,9 +116,8 @@ class FFmpegGUI(PreviousFFmpegGUI):
         if not resolved:
             QMessageBox.warning(
                 self, 'FFmpeg introuvable',
-                'FFmpeg n’est pas configuré ou le chemin n’existe plus.\n\n'
-                'Téléchargement officiel : https://ffmpeg.org/download.html\n'
-                'Sélectionne ensuite ffmpeg.exe avec le bouton « Parcourir... ».'
+                'FFmpeg introuvable. Télécharge-le sur https://ffmpeg.org/download.html\n'
+                '(ffmpeg.exe se trouve dans le dossier bin du téléchargement).'
             )
             self._update_ffmpeg_help()
             return
