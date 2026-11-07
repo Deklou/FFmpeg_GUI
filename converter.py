@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal, QObject
 from config import ConversionSettings, build_command
+from file_utils import publish_without_overwrite
 from metrics import parse_speed, parse_out_time, estimate_remaining
 
 def locate_ffmpeg():
@@ -183,13 +184,20 @@ class ConversionWorker(QThread):
                     self.state_changed.emit(index, 'Déjà converti')
                     self.progress_changed.emit(index, 100)
                 else:
-                    os.replace(temporary, target)
-                    done += 1
+                    if publish_without_overwrite(temporary, target):
+                        done += 1
+                        self.state_changed.emit(index, 'Terminé')
+                        label = 'Terminé'
+                    else:
+                        # Une autre application a pu créer la sortie entre
+                        # le contrôle initial et la fin de l'encodage.
+                        skipped += 1
+                        self.state_changed.emit(index, 'Déjà converti')
+                        label = 'Déjà converti'
                     try:
-                        self.output_measured.emit(index, target.stat().st_size, 'Terminé')
+                        self.output_measured.emit(index, target.stat().st_size, label)
                     except OSError:
                         pass
-                    self.state_changed.emit(index, 'Terminé')
                     self.progress_changed.emit(index, 100)
             except (OSError, ValueError) as exc:
                 failed += 1

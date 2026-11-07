@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 from converter import ConversionWorker, ParallelBatchController, locate_ffmpeg
 from config import ConversionSettings, PresetStore, BUILTIN_PRESETS, default_preset_path
 from metrics import format_bytes, reduction_percentage, calculate_summary, format_duration, format_reduction
-from file_utils import VIDEO_EXTENSIONS, discover_videos, plan_destinations, path_identity, classify_paths, file_signature, renamed_candidate
+from file_utils import VIDEO_EXTENSIONS, discover_videos, plan_destinations, path_identity, classify_paths, file_signature, renamed_candidate, output_change_requires_rescan
 class _BaseUI(QMainWindow):
     """Conversion par lot avec presets vidéo et contrôles de compatibilité."""
 
@@ -850,9 +850,17 @@ class _SourceUI(_BaseUI):
     def select_output_dir(self):
         previous = self.output_dir
         super().select_output_dir()
-        if self.output_dir != previous:
-            self.refresh_sources()
-        self.refresh_destinations()
+        if self.output_dir == previous:
+            return
+        # Ne pas scanner toutes les vidéos quand le dossier de sortie
+        # n'est pas à l'intérieur d'une racine surveillée. Le scan synchrone
+        # était susceptible de figer momentanément l'interface.
+        if output_change_requires_rescan(
+            previous, self.output_dir, self.monitored_roots.values()
+        ):
+            self.refresh_sources()  # met aussi les destinations à jour
+        else:
+            self.refresh_destinations()
 
     def remove_selected(self):
         selected = {index.row() for index in self.table.selectedIndexes()}
@@ -1068,15 +1076,20 @@ class _ParallelUI(_CompactUI):
     def start_conversion(self):
         if self.is_converting() or not self.video_paths:
             return
-        self.refresh_sources()
-        self.refresh_destinations()
+        # Vérifications rapides AVANT un rescan potentiellement coûteux.
+        # Lancer sans dossier de sortie ne doit jamais analyser les sources.
+        if not self.output_dir:
+            QMessageBox.warning(self, 'Dossier de sortie', 'Choisis un dossier de sortie.')
+            return
+        if not Path(self.output_dir).is_dir():
+            QMessageBox.warning(self, 'Dossier de sortie', 'Le dossier de sortie est introuvable ou inaccessible.')
+            return
         self.remember_ffmpeg()
         if not Path(self.ffmpeg_path).is_file():
             QMessageBox.warning(self, 'FFmpeg', 'Sélectionne un fichier ffmpeg.exe valide.')
             return
-        if not self.output_dir:
-            QMessageBox.warning(self, 'Dossier de sortie', 'Choisis un dossier de sortie.')
-            return
+        self.refresh_sources()
+        self.refresh_destinations()
         settings = self.current_conversion_settings()
         try:
             settings.validate()

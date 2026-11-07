@@ -1,6 +1,8 @@
 """Découverte, planification des destinations, glisser-déposer et renommages."""
 import os
 import hashlib
+import shutil
+import errno
 from collections import Counter
 from pathlib import Path
 VIDEO_EXTENSIONS = {'.mkv', '.mp4'}
@@ -121,3 +123,59 @@ def renamed_candidate(old_path, signature, occupied_paths=()):
     except OSError:
         return None
     return str(matches[0]) if len(matches) == 1 else None
+
+
+def output_change_requires_rescan(previous_output, new_output, monitored_roots):
+    """Rescanner seulement si les exclusions des dossiers surveillés changent.
+
+    Un dossier de sortie est exclu de la découverte uniquement lorsqu'il
+    est un sous-dossier STRICT d'une racine surveillée.
+    """
+    def excluded_for(root, output):
+        if not output:
+            return None
+        try:
+            root_resolved = Path(root).resolve()
+            output_resolved = Path(output).resolve()
+            output_resolved.relative_to(root_resolved)
+        except (ValueError, OSError):
+            return None
+        if output_resolved == root_resolved:
+            return None
+        return path_identity(output_resolved)
+
+    return any(
+        excluded_for(root, previous_output) != excluded_for(root, new_output)
+        for root in monitored_roots
+    )
+
+
+def publish_without_overwrite(temporary, target):
+    """Publie une conversion sans remplacer une sortie créée entre-temps.
+
+    La création de lien est atomique sur les volumes qui la supportent. Sur
+    d'autres systèmes de fichiers, l'ouverture exclusive évite l'écrasement.
+    Retourne False si la destination existe déjà.
+    """
+    temporary, target = Path(temporary), Path(target)
+    try:
+        os.link(temporary, target)
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        if exc.errno not in {errno.EPERM, errno.EACCES, errno.ENOSYS,
+                             errno.EXDEV, errno.EOPNOTSUPP, errno.ENOTSUP}:
+            raise
+        try:
+            with target.open('xb') as destination:
+                with temporary.open('rb') as source:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                destination.flush()
+                os.fsync(destination.fileno())
+        except FileExistsError:
+            return False
+        except OSError:
+            target.unlink(missing_ok=True)
+            raise
+    temporary.unlink()
+    return True
