@@ -1,7 +1,7 @@
 """Point d'entrée FFmpeg GUI."""
 import sys
 from PySide6.QtWidgets import QApplication
-from interface import FFmpegGUI
+from interface_v013 import FFmpegGUI
 
 
 def main():
