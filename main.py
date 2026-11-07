@@ -1,7 +1,7 @@
 import sys
 
 from PySide6.QtWidgets import QApplication
-from interface_v08 import FFmpegGUI
+from interface_v09 import FFmpegGUI
 
 
 def main():
