@@ -1,17 +1,18 @@
-"""V0.8 — Présentation compacte de FFmpeg GUI, sans toucher au moteur V0.7.
+"""V0.8.1 — Interface compacte : fenêtre redimensionnable et panneaux réversibles.
 
-Cette classe réorganise les widgets existants et hérite de toutes les
-fonctionnalités de synchronisation et de conversion de l'interface V0.7.
+Réutilise intégralement les fonctions métier et de synchronisation de V0.7.
 """
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
 )
@@ -22,13 +23,15 @@ from interface_v07 import FFmpegGUI as PreviousFFmpegGUI
 class FFmpegGUI(PreviousFFmpegGUI):
     def __init__(self):
         self._compact_ready = False
+        self._height_before_advanced = None
         super().__init__()
-        self.setWindowTitle("FFmpeg GUI — V0.8")
+        self.setWindowTitle("FFmpeg GUI — V0.8.1")
         self.resize(1450, 850)
         self._reorganize_interface()
         self._compact_ready = True
         self.update_paths()
         self._configure_table()
+        self._enable_small_windows()
 
     @staticmethod
     def _readonly_path():
@@ -44,8 +47,8 @@ class FFmpegGUI(PreviousFFmpegGUI):
         old_paths_group = main_layout.itemAt(1).widget()
         ffmpeg_group = main_layout.itemAt(2).widget()
 
-        # Le cadre initial reste en place, caché, pour préserver les références
-        # utilisées par la V0.7 et leurs connexions aux signaux.
+        # Conserver les widgets originaux (et leurs signaux) sans montrer
+        # l'ancien cadre de chemins.
         old_paths_group.hide()
         compact_group = QGroupBox("Fichiers et dossiers")
         compact_layout = QVBoxLayout(compact_group)
@@ -60,8 +63,6 @@ class FFmpegGUI(PreviousFFmpegGUI):
         self.input_path_field.setPlaceholderText("Aucun dossier importé")
         self.output_path_field.setPlaceholderText("Choisir un dossier de sortie")
 
-        # Ajouter un widget à un nouveau layout le retire de son ancien
-        # layout ; les mêmes boutons et callbacks continuent de fonctionner.
         first_row.addWidget(self.import_button)
         first_row.addWidget(self.folder_button)
         first_row.addWidget(QLabel("Entrée :"))
@@ -79,8 +80,6 @@ class FFmpegGUI(PreviousFFmpegGUI):
         compact_layout.addLayout(check_row)
         main_layout.insertWidget(1, compact_group)
 
-        # On garde le chemin FFmpeg, le preset et le résumé visibles.
-        # Seuls les deux panneaux techniques deviennent repliables.
         self.advanced_button = QPushButton("▸ Afficher les réglages avancés")
         self.advanced_button.setCheckable(True)
         self.advanced_button.setChecked(False)
@@ -98,29 +97,61 @@ class FFmpegGUI(PreviousFFmpegGUI):
         self.advanced_button.toggled.connect(self._toggle_advanced)
         self._toggle_advanced(False)
 
-        # Le tableau est prioritaire dans la hauteur de fenêtre.
-        self.table.setMinimumHeight(240)
+        # Moins de hauteur minimale pour laisser la fenêtre se contracter.
+        self.table.setMinimumHeight(80)
         self.table.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         for index in range(main_layout.count()):
             item = main_layout.itemAt(index)
-            if item.widget() is self.table:
-                main_layout.setStretch(index, 1)
-            else:
-                main_layout.setStretch(index, 0)
+            main_layout.setStretch(
+                index, 1 if item.widget() is self.table else 0
+            )
 
         self.import_button.setToolTip("Choisir des vidéos individuelles")
         self.folder_button.setToolTip("Importer et surveiller un dossier")
         self.refresh_button.setToolTip("Actualiser les dossiers surveillés")
 
+    def _enable_small_windows(self):
+        """Éviter que les minima des panneaux bloquent la taille de fenêtre.
+
+        En dessous de la hauteur nécessaire, les contrôles restent accessibles
+        en faisant défiler la page. À hauteur normale, le tableau s'étend.
+        """
+        content = self.takeCentralWidget()
+        scroll = QScrollArea(self)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        content.setMinimumSize(0, 0)
+        scroll.setWidget(content)
+        self.setCentralWidget(scroll)
+        self.setMinimumSize(620, 340)
+
     def _toggle_advanced(self, expanded):
+        # Au moment d'ouvrir, retenir la hauteur visible de la fenêtre.
+        if expanded and self._compact_ready:
+            self._height_before_advanced = self.height()
+
         for panel in self._advanced_panels:
             panel.setVisible(expanded)
         self.advanced_button.setText(
             "▾ Masquer les réglages avancés"
             if expanded else "▸ Afficher les réglages avancés"
         )
+
+        # Certaines mises en page Qt agrandissent la fenêtre à l'ouverture
+        # mais ne réduisent pas automatiquement sa taille à la fermeture.
+        if not expanded and self._compact_ready:
+            wanted_height = self._height_before_advanced
+            self._height_before_advanced = None
+            if wanted_height is not None:
+                QTimer.singleShot(0, lambda h=wanted_height: self._restore_height(h))
+
+    def _restore_height(self, height):
+        if not self.advanced_button.isChecked():
+            self.resize(self.width(), max(self.minimumHeight(), height))
 
     def _configure_table(self):
         header = self.table.horizontalHeader()
@@ -137,8 +168,6 @@ class FFmpegGUI(PreviousFFmpegGUI):
         super().update_paths()
         if not getattr(self, "_compact_ready", False):
             return
-        # On réutilise les libellés calculés par l'interface existante,
-        # sans dupliquer sa logique de sélection des dossiers.
         sources = self.input_label.text().partition(": ")[2]
         destination = self.output_label.text().partition(": ")[2]
         self.input_path_field.setText(sources)
