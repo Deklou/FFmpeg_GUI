@@ -1,13 +1,18 @@
 # FFmpeg GUI
 
-FFmpeg GUI est une application Windows avec interface graphique pour convertir des vidéos MP4 et MKV avec **FFmpeg**.
+Logiciel Windows pour convertir des vidéos MP4 et MKV avec FFmpeg.
 
-Glissez vos vidéos ou dossiers dans la fenêtre, choisissez le codec H.264/H.265, la qualité et le format de sortie. L'application permet les conversions simultanées, conserve les arborescences et affiche la progression et les statistiques de compression.
+Il permet de convertir plusieurs vidéos à la fois, de choisir entre H.264 et H.265, de régler la qualité et de suivre la progression. On peut aussi glisser-déposer des fichiers ou des dossiers dans la fenêtre.
 
-## Installation (version Python)
+## Télécharger
 
-1. Téléchargez **[FFmpeg](https://ffmpeg.org/download.html)**, puis sélectionnez `ffmpeg.exe` dans l'application (ou placez-le dans le `PATH` Windows, à côté de `main.py` ou dans `bin/`). `ffprobe.exe` est conseillé pour les estimations de durée.
-2. Installez Python 3.10+ et exécutez `python -m pip install -r requirements.txt`.
-3. Lancez `python main.py`.
+Récupérer `FFmpeg_GUI.exe` dans les [Releases](https://github.com/Deklou/FFmpeg_GUI/releases).
 
-Les fichiers source sont conservés et les sorties déjà présentes ne sont pas écrasées. Les préférences et presets sont stockés sur le PC de l'utilisateur, hors du dépôt.
+FFmpeg reste nécessaire : [télécharger FFmpeg](https://ffmpeg.org/download.html), puis sélectionner `ffmpeg.exe` dans le logiciel (dans le dossier `bin` du téléchargement).
+
+## Lancer depuis le code source
+
+```powershell
+python -m pip install -r requirements.txt
+python main.py
+```
