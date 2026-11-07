@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtWidgets import (
     QFileDialog,
     QComboBox,
+    QCheckBox,
     QSpinBox,
     QInputDialog,
     QFormLayout,
@@ -29,6 +30,7 @@ from conversion_settings import ConversionSettings
 from presets import PresetStore, BUILTIN_PRESETS
 from compression_stats import format_bytes, reduction_percentage, calculate_summary
 from conversion_time import format_duration, format_reduction
+from output_planning import discover_videos, plan_destinations, path_identity
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4"}
 
@@ -46,6 +48,7 @@ class FFmpegGUI(QMainWindow):
         self.output_dir = self.settings.value("output_dir", "")
         self.video_paths = []
         self.video_keys = set()
+        self.source_roots = {}  # identité du fichier -> dossier racine si import dossier
         self.output_sizes = {}  # index de ligne -> octets de sortie validée
         self.worker = None
         self.conversion_active = False
@@ -101,6 +104,18 @@ class FFmpegGUI(QMainWindow):
             buttons_layout.addWidget(button)
         buttons_layout.addStretch()
         paths_layout.addLayout(buttons_layout)
+
+        folders_options = QHBoxLayout()
+        self.recursive_check = QCheckBox("Inclure les sous-dossiers")
+        self.recursive_check.setChecked(False)
+        self.recursive_check.setToolTip("Recherche aussi les vidéos dans les dossiers imbriqués lors de l'ajout d'un dossier.")
+        self.preserve_tree_check = QCheckBox("Conserver l'arborescence en sortie")
+        self.preserve_tree_check.setChecked(True)
+        self.preserve_tree_check.setToolTip("Recrée les sous-dossiers relatifs au dossier importé. Les fichiers ajoutés individuellement vont à la racine.")
+        folders_options.addWidget(self.recursive_check)
+        folders_options.addWidget(self.preserve_tree_check)
+        folders_options.addStretch()
+        paths_layout.addLayout(folders_options)
 
         self.input_label = QLabel()
         self.output_label = QLabel()
@@ -266,6 +281,7 @@ class FFmpegGUI(QMainWindow):
         self.import_button.clicked.connect(self.import_videos)
         self.folder_button.clicked.connect(self.import_folder)
         self.output_button.clicked.connect(self.select_output_dir)
+        self.preserve_tree_check.toggled.connect(self.update_actions)
         self.remove_button.clicked.connect(self.remove_selected)
         self.clear_button.clicked.connect(self.clear_videos)
         self.table.itemSelectionChanged.connect(self.update_actions)
@@ -447,18 +463,15 @@ class FFmpegGUI(QMainWindow):
             return
         self.remember_input_dir(folder)
         try:
-            paths = sorted(
-                (
-                    str(path)
-                    for path in Path(folder).iterdir()
-                    if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
-                ),
-                key=str.casefold,
+            # Ne jamais réimporter un dossier de sortie situé dans l'arbre source.
+            paths = discover_videos(
+                folder, recursive=self.recursive_check.isChecked(),
+                exclude_folder=self.output_dir or None,
             )
         except OSError as exc:
             self.statusBar().showMessage(f"Lecture du dossier impossible : {exc}")
             return
-        added = self.add_paths(paths)
+        added = self.add_paths(paths, source_root=folder)
         self.statusBar().showMessage(f"{added} vidéo(s) ajoutée(s) depuis ce dossier")
 
     def remember_input_dir(self, folder):
@@ -475,12 +488,17 @@ class FFmpegGUI(QMainWindow):
             self.settings.setValue("output_dir", folder)
             self.update_paths()
 
-    def add_paths(self, paths):
+    def add_paths(self, paths, source_root=None):
         added = 0
         for raw_path in paths:
             path = Path(raw_path)
             key = self.path_key(path)
-            if key in self.video_keys or path.suffix.lower() not in VIDEO_EXTENSIONS or not path.is_file():
+            if key in self.video_keys:
+                # Un fichier ajouté manuellement peut acquérir une racine lors d'un import de dossier.
+                if source_root and self.source_roots.get(path_identity(path)) is None:
+                    self.source_roots[path_identity(path)] = source_root
+                continue
+            if path.suffix.lower() not in VIDEO_EXTENSIONS or not path.is_file():
                 continue
             try:
                 size = path.stat().st_size
@@ -489,6 +507,7 @@ class FFmpegGUI(QMainWindow):
 
             self.video_paths.append(str(path))
             self.video_keys.add(key)
+            self.source_roots[path_identity(path)] = source_root
 
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -520,6 +539,7 @@ class FFmpegGUI(QMainWindow):
             path = item.data(Qt.ItemDataRole.UserRole) if item else None
             if path:
                 self.video_keys.discard(self.path_key(path))
+                self.source_roots.pop(path_identity(path), None)
                 self.video_paths = [
                     existing for existing in self.video_paths
                     if self.path_key(existing) != self.path_key(path)
@@ -534,6 +554,7 @@ class FFmpegGUI(QMainWindow):
     def clear_videos(self):
         self.video_paths.clear()
         self.video_keys.clear()
+        self.source_roots.clear()
         self.table.setRowCount(0)
         self.output_sizes.clear()
         self.update_paths()
@@ -567,6 +588,8 @@ class FFmpegGUI(QMainWindow):
         self.import_button.setEnabled(not self.is_converting())
         self.folder_button.setEnabled(not self.is_converting())
         self.output_button.setEnabled(not self.is_converting())
+        self.recursive_check.setEnabled(not self.is_converting())
+        self.preserve_tree_check.setEnabled(not self.is_converting())
         self.ffmpeg_edit.setEnabled(not self.is_converting())
         self.ffmpeg_browse.setEnabled(not self.is_converting())
         self.start_button.setEnabled(count > 0 and not self.is_converting())
@@ -607,8 +630,14 @@ class FFmpegGUI(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "Paramètres incompatibles", str(exc))
             return
-        if any(self.path_key(path) == self.path_key(Path(self.output_dir) / (Path(path).stem + f".{conversion_settings.container}")) for path in self.video_paths):
-            QMessageBox.warning(self, "Dossier de sortie", "Le fichier de destination ne doit pas être le fichier source.")
+        targets = plan_destinations(
+            self.video_paths, self.source_roots, self.output_dir,
+            conversion_settings.container,
+            preserve_tree=self.preserve_tree_check.isChecked(),
+        )
+        source_identities = {path_identity(source) for source in self.video_paths}
+        if any(path_identity(target) in source_identities for target in targets):
+            QMessageBox.warning(self, "Dossier de sortie", "Une destination correspond à une vidéo source du lot. Choisis un autre dossier de sortie.")
             return
 
         self.batch_progress.setValue(0)
@@ -625,8 +654,10 @@ class FFmpegGUI(QMainWindow):
                 self.table.item(row, col).setText("—")
         self.worker = ConversionWorker(
             self.video_paths, self.output_dir, self.ffmpeg_path,
-            settings=conversion_settings, parent=self
+            settings=conversion_settings, parent=self, targets=targets
         )
+        for row, target in enumerate(targets):
+            self.table.item(row, 0).setToolTip(f"Destination prévue : {target}")
         self.worker.state_changed.connect(self.on_file_state)
         self.worker.progress_changed.connect(self.on_file_progress)
         self.worker.output_measured.connect(self.on_output_measured)

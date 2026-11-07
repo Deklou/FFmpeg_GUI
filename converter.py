@@ -53,9 +53,12 @@ class ConversionWorker(QThread):
     output_measured = Signal(int, int, str)  # index, taille réelle en octets, statut
     batch_finished = Signal(int, int, int, bool, list)  # ok, ignored, errors, cancelled, details
 
-    def __init__(self, sources, output_folder, ffmpeg_path, settings=None, parent=None):
+    def __init__(self, sources, output_folder, ffmpeg_path, settings=None, parent=None, targets=None):
         super().__init__(parent)
         self.sources = list(sources)
+        self.targets = [Path(p) for p in targets] if targets is not None else [Path(output_folder) / (Path(p).stem + "." + (settings.container if settings else "mkv")) for p in sources]
+        if len(self.targets) != len(self.sources):
+            raise ValueError("Le nombre de destinations ne correspond pas aux sources.")
         self.output_folder = Path(output_folder)
         self.ffmpeg_path = str(ffmpeg_path)
         self.settings = settings if settings is not None else ConversionSettings()
@@ -90,7 +93,7 @@ class ConversionWorker(QThread):
             if self.cancel_event.is_set():
                 break
             source = Path(filename)
-            target = self.output_folder / f"{source.stem}.{self.settings.container}"
+            target = self.targets[index]
             if target.exists() or not source.is_file():
                 durations[index] = 0.0
             else:
@@ -100,7 +103,7 @@ class ConversionWorker(QThread):
             if self.cancel_event.is_set():
                 break
             source = Path(filename)
-            target = self.output_folder / f"{source.stem}.{self.settings.container}"
+            target = self.targets[index]
             if target.exists():
                 skipped += 1
                 try:
@@ -117,11 +120,19 @@ class ConversionWorker(QThread):
                 errors.append(f"{source.name} : source introuvable")
                 continue
 
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                failed += 1
+                self.state_changed.emit(index, "Erreur")
+                errors.append(f"{source.name} : création du dossier impossible ({exc})")
+                continue
+
             self.state_changed.emit(index, "Conversion en cours")
             self.progress_changed.emit(index, 0)
             duration = durations.get(index)
             # Le fichier temporaire conserve l’extension du conteneur pour FFmpeg.
-            temporary = self.output_folder / f".{source.stem}.{uuid.uuid4().hex}.part.{self.settings.container}"
+            temporary = target.parent / f".{target.stem}.{uuid.uuid4().hex}.part.{self.settings.container}"
             command = build_command(self.ffmpeg_path, source, temporary, self.settings)
             recent_errors = []
             process = None

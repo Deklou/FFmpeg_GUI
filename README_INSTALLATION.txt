@@ -1,35 +1,50 @@
-FFmpeg GUI V0.5 — Suivi temporel et pourcentages sans +
-=====================================================
+FFmpeg GUI V0.6 - Sous-dossiers et sécurité des destinations
+==========================================================
 
-Installation dans ton dossier FFmpeg_GUI existant :
-- Remplacer interface.py et converter.py
-- Ajouter conversion_time.py
-- Optionnel : ajouter test_conversion_time.py
-- Conserver main.py, conversion_settings.py, compression_stats.py,
-  presets.py, requirements.txt et tes presets existants.
+INSTALLATION
+Fermez l'application. Dans votre dossier FFmpeg_GUI, remplacez :
+  - interface.py
+  - converter.py
+Ajoutez :
+  - output_planning.py
 
-Démarrer avec : python main.py
+Conservez tous vos autres fichiers (main.py, presets.py,
+conversion_settings.py, conversion_time.py, compression_stats.py, etc.).
 
-Nouveautés :
-- Pourcentage de réduction sans signe + devant les valeurs positives.
-- Trois colonnes : Temps écoulé, Restant estimé, Vitesse (x).
-- Sous la progression globale : temps écoulé du lot et ETA du lot.
-- Le temps écoulé reste disponible même si FFprobe ne peut pas lire la durée.
-- L'ETA reste « — » si la durée ou la vitesse est indisponible.
-- Le temps restant du lot est une estimation basée sur la vitesse du
-  fichier actuel extrapolée aux durées des fichiers suivants. Elle peut
-  varier fortement d'une vidéo à l'autre.
-- Analyse préliminaire des durées en arrière-plan (FFprobe) avant
-  l'encodage ; pour un grand lot, le démarrage peut prendre quelques instants.
+Puis lancez : python main.py
 
-Tests conseillés :
-1. Sur une vidéo, constater le temps écoulé, la vitesse et l'ETA.
-2. Avec plusieurs vidéos, constater le temps total du lot et son ETA.
-3. Vérifier un fichier déjà converti : il doit rester ignoré.
-4. Vérifier qu'une réduction positive affiche « 42,5 % » et non « +42,5 % ».
-5. Vérifier l'annulation et les presets habituels.
+NOUVEAUTÉS
+- « Inclure les sous-dossiers » : décoché par défaut, prend effet lors de
+  l'import d'un dossier. Les vidéos déjà importées ne changent pas.
+- « Conserver l'arborescence en sortie » : coché par défaut. Exemple :
+    Entrée/Série A/épisode.mp4 -> Sortie/Série A/épisode.mkv
+- Option décochée : toutes les vidéos sont placées à la racine du dossier
+  de sortie. En cas de noms identiques, suffixe stable __<empreinte>.
+- Fichiers ajoutés individuellement : dans la racine de sortie, sauf s'ils
+  ont également été reconnus lors de l'import d'un dossier.
+- Les dossiers de sortie situés dans le dossier importé ne sont pas réimportés.
+- Les destinations sont calculées avant le lot et ne peuvent pas correspondre
+  à l'un des fichiers sources du lot. Les fichiers existants sont ignorés,
+  jamais écrasés volontairement.
+- Passez la souris sur le nom de la vidéo pour connaître la destination
+  prévue une fois que le lot a été lancé.
 
-Test automatisé facultatif : python -m unittest -v test_conversion_time.py
+ATTENTION
+Les sorties déjà présentes restent ignorées sans validation de leur codec.
+Si les options « Conserver l'arborescence » et « Inclure les sous-dossiers »
+sont indépendantes. Changer la conservation avant le prochain lot modifie
+les destinations calculées ; ne supprime pas les fichiers déjà créés.
 
-Ce correctif ne modifie pas les commandes FFmpeg ni les presets.
-Le dépôt GitHub n'a pas été modifié.
+TESTS SUGGÉRÉS
+1) Importer un dossier avec et sans recherche récursive.
+2) Garder l'arborescence et lancer un encodage : vérifier les sous-dossiers.
+3) Décocher la conservation de l'arborescence : tester 2 épisodes homonymes.
+4) Relancer le lot : vérifier que les sorties existantes sont ignorées.
+5) Vérifier qu'on ne peut pas convertir un fichier sur lui-même.
+6) Vérifier progression, temps restant, réduction et presets.
+
+TEST AUTOMATIQUE FACULTATIF
+python -m unittest test_output_planning -v
+
+Aucun changement n'a été envoyé à GitHub : seuls les fichiers de
+cette archive sont fournis, à intégrer et committer par vos soins.
