@@ -1,0 +1,16 @@
+Checklist V0.11 — refactorisation sans changement fonctionnel
+
+[ ] Démarrage avec une fenêtre propre sans chemins de ton PC préremplis.
+[ ] Sélectionner ffmpeg.exe via Parcourir puis lancer une petite conversion.
+[ ] Vérifier le preset H.265/MKV et créer/retrouver un nouveau preset après redémarrage.
+[ ] Glisser une vidéo et la renommer dans l'Explorateur : son nom suit.
+[ ] Glisser un dossier, y ajouter/supprimer/renommer des vidéos : synchronisation.
+[ ] Cocher/décocher Inclure les sous-dossiers : liste actualisée.
+[ ] Cocher/décocher Conserver l'arborescence : destinations recalculées.
+[ ] Deux vidéos de même nom : pas d'écrasement, ni perte de fichier.
+[ ] Convertir 2 vidéos simultanément : progression, durées et réductions correctes.
+[ ] Annuler une conversion : aucune sortie partielle définitive, reprises possibles.
+[ ] Relancer un lot terminé : fichiers existants ignorés.
+[ ] Fermer/réouvrir : taille, colonnes, réglages avancés mémorisés.
+[ ] Dossier de sortie dans l'arbre source / parent de la source : pas d'auto-import des sorties.
+[ ] Application lancée sans FFmpeg dans le PATH : message de configuration clair.
