@@ -1,7 +1,7 @@
 import sys
 
 from PySide6.QtWidgets import QApplication
-from interface import FFmpegGUI
+from interface_v07 import FFmpegGUI
 
 
 def main():
@@ -11,5 +11,5 @@ def main():
     sys.exit(app.exec())
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
