@@ -1891,9 +1891,8 @@ class FFmpegGUI(VideoGUI):
             summary += f" | {settings.bitrate}"
         self.encoding_info.setText(summary)
 
-    def refresh_destinations(self, *_args):
-        if not self._is_audio():
-            return super().refresh_destinations(*_args)
+    def _refresh_audio_destinations(self, *_args):
+        """Planifie les sorties audio selon leur vrai format (WAV/MP3/OGG/FLAC/M4A)."""
         if self.is_converting() or self.table.columnCount() < 12:
             return
         if self.output_dir:
@@ -2044,9 +2043,12 @@ class FFmpegGUI(VideoGUI):
         return super().on_timing_finished(index, elapsed)
 
     def refresh_destinations(self, *_args):
-        # Les deux modes calculent leurs destinations respectives comme avant.
-        # Le tableau est ensuite aligné sur les sorties réellement présentes.
-        super().refresh_destinations(*_args)
+        # Conserver la planification propre au mode audio : la classe parente
+        # ne connaît que les extensions vidéo et calculerait des .mkv/.mp4.
+        if self._is_audio():
+            self._refresh_audio_destinations(*_args)
+        else:
+            super().refresh_destinations(*_args)
         if not getattr(self, "_output_sync_ready", False) or self.is_converting():
             return
         self._sync_output_queue()
