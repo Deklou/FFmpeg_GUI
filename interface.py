@@ -540,7 +540,6 @@ class _BaseUI(QMainWindow):
         if any((path_identity(target) in source_identities for target in targets)):
             QMessageBox.warning(self, 'Dossier de sortie', 'Une destination correspond à une vidéo source du lot. Choisis un autre dossier de sortie.')
             return
-        self.batch_progress.setValue(0)
         self.batch_elapsed_label.setText('Temps écoulé du lot : 00:00:00')
         self.batch_eta_label.setText('Temps restant estimé du lot : —')
         self.batch_eta_seconds = None
@@ -835,8 +834,8 @@ class _SourceUI(_BaseUI):
         else:
             targets = tuple(plan_destinations(self.video_paths, self.source_roots, self.output_dir, self.container_combo.currentData(), preserve_tree=self.preserve_tree_check.isChecked()))
         if targets != self._destinations:
-            if self.output_sizes:
-                self.reset_output_stats()
+            # Pas de reset global : le contrôleur final recalcule les données
+            # ligne par ligne selon la destination et l'existence réelle.
             self._destinations = targets
         for row in range(self.table.rowCount()):
             target = str(targets[row]) if row < len(targets) else '—'
@@ -1101,19 +1100,23 @@ class _ParallelUI(_CompactUI):
         if any((path_identity(target) in identities for target in targets)):
             QMessageBox.warning(self, 'Dossier de sortie', 'Une destination correspond à une vidéo source du lot. Choisis un autre dossier de sortie.')
             return
-        self.batch_progress.setValue(0)
         self.batch_elapsed_label.setText('Temps écoulé du lot : 00:00:00')
         self.batch_eta_label.setText('Temps restant estimé du lot : —')
         self.batch_eta_seconds = None
         self.active_file_started_at = None
         self.active_file_index = None
-        self.reset_output_stats()
         for row in range(self.table.rowCount()):
-            self.table.item(row, 6).setText('En attente')
-            self.table.cellWidget(row, 7).setValue(0)
-            for column in (8, 9, 10):
-                self.table.item(row, column).setText('—')
-            self.table.item(row, 0).setToolTip(f'Destination prévue : {targets[row]}')
+            target = Path(targets[row])
+            if not target.is_file():
+                self.table.item(row, 6).setText('En attente')
+                self.table.cellWidget(row, 7).setValue(0)
+                for column in (8, 9, 10):
+                    self.table.item(row, column).setText('—')
+            self.table.item(row, 0).setToolTip(f'Destination prévue : {target}')
+        # Les sorties existantes ne doivent pas perdre leurs statistiques
+        # lors du démarrage d'un nouveau lot.
+        if getattr(self, '_output_sync_ready', False):
+            self._sync_output_queue()
         parallel = self.parallel_spin.value()
         if parallel == 1:
             self.worker = ConversionWorker(self.video_paths, self.output_dir, self.ffmpeg_path, settings=settings, parent=self, targets=targets)
@@ -1739,6 +1742,10 @@ class FFmpegGUI(VideoGUI):
     """Sélecteur de traitement et panneau audio ; mode vidéo inchangé."""
 
     def __init__(self):
+        # La synchronisation des sorties démarre seulement après la création
+        # complète des widgets et des réglages audio.
+        self._output_sync_ready = False
+        self._last_target_for_source = {}
         self._audio_ready = False
         super().__init__()
         self.setWindowTitle("FFmpeg GUI — V1.1")
@@ -1748,6 +1755,8 @@ class FFmpegGUI(VideoGUI):
         mode = self.settings.value("v11/processing_mode", "video")
         self.mode_combo.setCurrentIndex(1 if mode == "audio" else 0)
         self._change_mode()
+        self._output_sync_ready = True
+        self.refresh_destinations()
 
     def _add_processing_mode(self):
         main_layout = self.centralWidget().widget().layout()
@@ -1896,8 +1905,8 @@ class FFmpegGUI(VideoGUI):
         else:
             targets = ()
         if targets != self._destinations:
-            if self.output_sizes:
-                self.reset_output_stats()
+            # Pas de reset global : le contrôleur final recalcule les données
+            # ligne par ligne selon la destination et l'existence réelle.
             self._destinations = targets
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 11)
@@ -1956,19 +1965,19 @@ class FFmpegGUI(VideoGUI):
         if any(path_identity(target) in identities for target in targets):
             QMessageBox.warning(self, "Sortie", "Une destination correspond à une vidéo source.")
             return
-        self.batch_progress.setValue(0)
         self.batch_elapsed_label.setText("Temps écoulé du lot : 00:00:00")
         self.batch_eta_label.setText("Temps restant estimé du lot : —")
         self.batch_eta_seconds = None
         self.active_file_started_at = None
         self.active_file_index = None
-        self.reset_output_stats()
         for row, target in enumerate(targets):
-            self.table.item(row, 6).setText("En attente")
-            self.table.cellWidget(row, 7).setValue(0)
-            for column in (8, 9, 10):
-                self.table.item(row, column).setText("—")
+            if not Path(target).is_file():
+                self.table.item(row, 6).setText("En attente")
+                self.table.cellWidget(row, 7).setValue(0)
+                for column in (8, 9, 10):
+                    self.table.item(row, column).setText("—")
             self.table.item(row, 0).setToolTip(f"Destination prévue : {target}")
+        self._sync_output_queue()
         parallel = self.parallel_spin.value()
         if parallel == 1:
             self.worker = AudioWorker(
@@ -2033,3 +2042,80 @@ class FFmpegGUI(VideoGUI):
                 self.table.item(index, 9).setText("—")
             return
         return super().on_timing_finished(index, elapsed)
+
+    def refresh_destinations(self, *_args):
+        # Les deux modes calculent leurs destinations respectives comme avant.
+        # Le tableau est ensuite aligné sur les sorties réellement présentes.
+        super().refresh_destinations(*_args)
+        if not getattr(self, "_output_sync_ready", False) or self.is_converting():
+            return
+        self._sync_output_queue()
+
+    def _sync_output_queue(self):
+        """Garde les résultats valides et réarme les sorties supprimées.
+
+        L'identité de la source évite de confondre les lignes après ajout ou
+        retrait d'un fichier. Aucun fichier n'est créé ni supprimé ici.
+        """
+        previous = self._last_target_for_source
+        current = {}
+        targets = self._destinations
+        for row, source in enumerate(self.video_paths):
+            if row >= self.table.rowCount():
+                break
+            source_key = path_identity(source)
+            target = Path(targets[row]) if row < len(targets) else None
+            target_key = path_identity(target) if target is not None else None
+            current[source_key] = target_key
+            changed = source_key in previous and previous[source_key] != target_key
+
+            state_item = self.table.item(row, 6)
+            size_item = self.table.item(row, 4)
+            reduction_item = self.table.item(row, 5)
+            source_item = self.table.item(row, 0)
+            progress = self.table.cellWidget(row, 7)
+            if any(item is None for item in (state_item, size_item, reduction_item, source_item)) or progress is None:
+                continue
+
+            if changed:
+                for column in (8, 9, 10):
+                    item = self.table.item(row, column)
+                    if item is not None:
+                        item.setText("—")
+
+            try:
+                output_size = target.stat().st_size if target is not None and target.is_file() else None
+            except OSError:
+                output_size = None
+
+            if output_size is not None:
+                self.output_sizes[row] = output_size
+                size_item.setText(format_bytes(output_size))
+                original = source_item.data(Qt.ItemDataRole.UserRole + 1)
+                reduction_item.setText(format_reduction(reduction_percentage(original, output_size)))
+                if changed or state_item.text() not in ("Terminé", "Déjà converti"):
+                    state_item.setText("Déjà converti")
+                size_item.setToolTip("Fichier de sortie présent sur le disque.")
+                if progress.value() != 100:
+                    progress.setValue(100)
+            else:
+                self.output_sizes.pop(row, None)
+                size_item.setText("—")
+                size_item.setToolTip("")
+                reduction_item.setText("—")
+                if changed or state_item.text() in ("Terminé", "Déjà converti"):
+                    state_item.setText("En attente")
+                    for column in (8, 9, 10):
+                        item = self.table.item(row, column)
+                        if item is not None:
+                            item.setText("—")
+                if progress.value():
+                    progress.setValue(0)
+
+        self._last_target_for_source = current
+        self.update_size_summary()
+        count = self.table.rowCount()
+        self.batch_progress.setValue(
+            round(sum(self.table.cellWidget(row, 7).value() for row in range(count)) / count)
+            if count else 0
+        )
